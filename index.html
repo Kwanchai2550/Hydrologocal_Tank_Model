@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tank Model Simulation with Statistics</title>
+    <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css" />
+    <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #f4f7f6; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .disclaimer { background-color: #fff3cd; border: 1px solid #ffeeba; padding: 15px; border-radius: 5px; margin-bottom: 20px; font-size: 0.85em; color: #856404; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 20px; }
+        .stat-card { background: #e3f2fd; padding: 15px; border-radius: 6px; text-align: center; border: 1px solid #bbdefb; }
+        .stat-value { font-size: 1.5em; font-weight: bold; color: #1976D2; }
+        .input-group { margin-bottom: 15px; display: grid; grid-template-columns: 1fr 2fr; align-items: center; }
+        button { border: none; padding: 12px; border-radius: 4px; cursor: pointer; color: white; font-weight: bold; }
+        .btn-run { background-color: #2196F3; flex: 2; }
+        .btn-export { background-color: #4CAF50; flex: 1; }
+        #graph-area { margin-top: 20px; }
+        #status-msg { margin: 10px 0; font-style: italic; color: #666; height: 20px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Hydrological Tank Model Analysis</h2>
+
+    <div class="disclaimer">
+        <strong>Disclaimer:</strong> This software is for research. Developed by <strong>Kwanchai Pakoksung</strong>, assumes no responsibility for any errors encountered during use. 
+        Please provide proper citation and credit when referencing this tool.
+    </div>
+
+    <div class="input-group">
+        <label>Basin Area (km²):</label>
+        <input type="number" id="area" value="1.0" step="0.1">
+    </div>
+
+    <div class="input-group">
+        <label>Rainfall Data (.txt):</label>
+        <input type="file" id="rain-file" accept=".txt">
+    </div>
+
+    <div style="display: flex; gap: 10px;">
+        <button class="btn-run" py-click="run_model">Run Simulation</button>
+        <button class="btn-export" py-click="export_to_csv">Export CSV</button>
+    </div>
+
+    <div id="status-msg"></div>
+
+    <div class="stats-grid" id="stats-area" style="display: none;">
+        <div class="stat-card">
+            <div>Peak Runoff (cms)</div>
+            <div id="peak-flow" class="stat-value">-</div>
+        </div>
+        <div class="stat-card">
+            <div>Total Volume (MCM)</div>
+            <div id="total-vol" class="stat-value">-</div>
+        </div>
+    </div>
+
+    <div id="graph-area"></div>
+</div>
+
+<py-config>
+    packages = ["numpy", "matplotlib"]
+</py-config>
+
+<script type="py">
+import numpy as np
+import matplotlib.pyplot as plt
+from pyscript import document, window, display
+import io
+
+last_q_sim = None
+
+def hQ_Calc(Para1, Para2, H):
+    return max(0.0, Para1 * (H - Para2))
+
+def params_dat():
+    return [0.024,0.056,0.000012,0.0523,0.0000223,0.0077,0.0297,1.00072,
+            75.0,0.31,0.01626,0.00126,5.0,0.01,6.5,17.734, 1.1]
+
+def run_tank_simulation(params, rain, basin_area):
+    n = len(rain)
+    calc_matrix = np.zeros((n, 12))
+    calc_matrix[0, 2], calc_matrix[0, 5], calc_matrix[0, 8], calc_matrix[0, 11] = params[12:16]
+
+    for k in range(n):
+        if k > 0:
+            calc_matrix[k, 2]  = (rain[k-1] * params[16]) + calc_matrix[k-1, 2] - sum(calc_matrix[k-1, [0,1,3]])
+            calc_matrix[k, 5]  = calc_matrix[k-1, 5] + calc_matrix[k-1, 3] - sum(calc_matrix[k-1, [4,6]])
+            calc_matrix[k, 8]  = calc_matrix[k-1, 8] + calc_matrix[k-1, 6] - sum(calc_matrix[k-1, [7,9]])
+            calc_matrix[k, 11] = calc_matrix[k-1, 11] + calc_matrix[k-1, 9] - calc_matrix[k-1, 10]
+
+        calc_matrix[k, 0] = hQ_Calc(params[0], params[8],  calc_matrix[k, 2])
+        calc_matrix[k, 1] = hQ_Calc(params[2], params[9],  calc_matrix[k, 2])
+        calc_matrix[k, 3] = hQ_Calc(params[1], 0.0,        calc_matrix[k, 2])
+        calc_matrix[k, 4] = hQ_Calc(params[4], params[10], calc_matrix[k, 5])
+        calc_matrix[k, 6] = hQ_Calc(params[3], 0.0,        calc_matrix[k, 5])
+        calc_matrix[k, 7] = hQ_Calc(params[6], params[11], calc_matrix[k, 8])
+        calc_matrix[k, 9] = hQ_Calc(params[5], 0.0,        calc_matrix[k, 8])
+        calc_matrix[k, 10]= hQ_Calc(params[7], 0.0,        calc_matrix[k, 11])
+        
+    q_sum = calc_matrix[:, 0] + calc_matrix[:, 1] + calc_matrix[:, 4] + calc_matrix[:, 7]
+    return (q_sum * (basin_area * 1000.0)) / 3600.0
+
+async def run_model(event):
+    global last_q_sim
+    status = document.getElementById("status-msg")
+    if status: status.innerText = "Processing simulation..."
+    
+    try:
+        area = float(document.getElementById("area").value)
+        file_input = document.getElementById("rain-file")
+        
+        if len(file_input.files) == 0:
+            window.alert("Please upload a .txt file!")
+            return
+
+        text = await file_input.files.item(0).text()
+        rain_data = np.array([float(x) for x in text.split() if x.strip()])
+        
+        # Calc.
+        last_q_sim = run_tank_simulation(params_dat(), rain_data, area)
+        
+        # Calc. Peak and Total Volume (m³)
+        # Total Vol = sum Q (cms) * 3600 sec
+        peak_val = np.max(last_q_sim)
+        total_vol = np.sum(last_q_sim) * 3600 / 1000000
+        
+        # print stat.
+        document.getElementById("stats-area").style.display = "grid"
+        document.getElementById("peak-flow").innerText = f"{peak_val:.3f}"
+        document.getElementById("total-vol").innerText = f"{total_vol:,.3f}"
+
+        # Plot graph
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), dpi=100, sharex=True)
+        plt.subplots_adjust(hspace=0.3)
+        
+        ax1.bar(range(len(rain_data)), rain_data, color='seagreen', alpha=0.7)
+        ax1.invert_yaxis()
+        ax1.set_ylabel("Rainfall (mm/hr)")
+        ax1.grid(True, alpha=0.3)
+        
+        ax2.plot(last_q_sim, color='royalblue', linewidth=2)
+        ax2.fill_between(range(len(last_q_sim)), 0, last_q_sim, color='royalblue', alpha=0.1)
+        ax2.set_ylabel("Runoff (cms)")
+        ax2.set_xlabel("Time (hr)")
+        ax2.grid(True, alpha=0.3)
+        
+        graph_div = document.getElementById("graph-area")
+        graph_div.innerHTML = ""
+        display(fig, target="graph-area")
+        
+        if status: status.innerText = "Done!"
+    except Exception as e:
+        window.alert(f"Error: {e}")
+        if status: status.innerText = "Error"
+
+def export_to_csv(event):
+    if last_q_sim is None:
+        window.alert("Run model first!")
+        return
+    csv = "Time(hr),Runoff(cms)\n" + "\n".join([f"{i},{v:.6f}" for i, v in enumerate(last_q_sim)])
+    blob = window.Blob.new([csv], {type: 'text/csv'})
+    url = window.URL.createObjectURL(blob)
+    link = document.createElement('a')
+    link.href = url
+    link.download = "runoff_data.csv"
+    link.click()
+</script>
+</body>
+</html>
